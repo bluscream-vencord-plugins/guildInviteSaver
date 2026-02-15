@@ -7,14 +7,18 @@
  */
 
 import { NavContextMenuPatchCallback } from "@api/ContextMenu";
+import { registerSharedContextMenu } from "./utils/menus";
 import { definePluginSettings } from "@api/Settings";
 import definePlugin, { OptionType } from "@utils/types";
 import { ChannelStore, Constants, GuildChannelStore, GuildStore, Menu, MessageStore, RestAPI, showToast, Toasts } from "@webpack/common";
+import { isTextChannel } from "./utils/channels";
 import { sendMessage } from "@utils/discord";
 
 import { Logger } from "@utils/Logger";
 
-const logger = new Logger("GuildInviteSaver", "#7289da");
+const pluginId = "guildInviteSaver";
+const pluginName = "Guild Invite Saver";
+const logger = new Logger(pluginName, "#7289da");
 
 const settings = definePluginSettings({
     autoBackupOnLeave: {
@@ -79,7 +83,7 @@ function getInviteLink(code: string): string {
 async function collectGuildInvites(guildId: string): Promise<string[]> {
     const invites = new Set<string>();
     const guild = GuildStore.getGuild(guildId);
-    
+
     if (!guild) {
         logger.warn(`Guild ${guildId} not found`);
         return [];
@@ -90,7 +94,7 @@ async function collectGuildInvites(guildId: string): Promise<string[]> {
     // Get channels first (needed for both invite creation and message searching)
     const channels = GuildChannelStore.getChannels(guildId);
     logger.debug(`Retrieved channels object for guild ${guildId}:`, channels ? Object.keys(channels) : "null");
-    
+
     if (!channels) {
         logger.warn(`No channels found for guild ${guildId}`);
         // Still check for vanity URL even if no channels
@@ -106,27 +110,27 @@ async function collectGuildInvites(guildId: string): Promise<string[]> {
     // - Numeric keys (like '4') representing channel types with arrays
     // - Direct channel objects
     let textChannels: any[] = [];
-    
+
     // Try TEXT property first (standard structure)
-    if (channels.TEXT && Array.isArray(channels.TEXT)) {
-        logger.debug(`Found TEXT array with ${channels.TEXT.length} items`);
+    if ((channels as any).TEXT && Array.isArray((channels as any).TEXT)) {
+        logger.debug(`Found TEXT array with ${(channels as any).TEXT.length} items`);
         // Extract the channel from each item in the TEXT array
-        textChannels = channels.TEXT
+        textChannels = (channels as any).TEXT
             .map((item: any) => item.channel || item)
-            .filter((channel: any) => channel && channel.type === 0); // GUILD_TEXT
+            .filter((channel: any) => isTextChannel(channel)); // GUILD_TEXT
         logger.debug(`Extracted ${textChannels.length} text channels after filtering`);
     } else {
         // Collect all arrays from the channels object and filter for text channels
         // The structure might have numeric keys (like '4') that are arrays of channels
         // or other properties that contain arrays
         const allChannelArrays: any[] = [];
-        
+
         for (const key of Object.keys(channels)) {
             // Skip non-array properties like 'id', 'count', 'SELECTABLE', 'VOCAL'
             if (key === 'id' || key === 'count' || key === 'SELECTABLE' || key === 'VOCAL') {
                 continue;
             }
-            
+
             const value = (channels as any)[key];
             if (Array.isArray(value)) {
                 logger.debug(`Found array at key '${key}' with ${value.length} items`);
@@ -144,11 +148,11 @@ async function collectGuildInvites(guildId: string): Promise<string[]> {
                 }
             }
         }
-        
+
         logger.debug(`Collected ${allChannelArrays.length} items from all arrays`);
         textChannels = allChannelArrays
             .map((item: any) => item.channel || item)
-            .filter((channel: any) => channel && channel.type === 0); // GUILD_TEXT
+            .filter((channel: any) => isTextChannel(channel)); // GUILD_TEXT
         logger.debug(`Extracted ${textChannels.length} text channels`);
     }
 
@@ -160,7 +164,7 @@ async function collectGuildInvites(guildId: string): Promise<string[]> {
             const channelId = textChannels[0].id;
             const channelName = textChannels[0].name || "unknown";
             logger.debug(`Attempting to create invite for channel ${channelName} (${channelId})`);
-            
+
             try {
                 // Discord API endpoint: POST /channels/{channel.id}/invites
                 const response = await RestAPI.post({
@@ -174,7 +178,7 @@ async function collectGuildInvites(guildId: string): Promise<string[]> {
                 });
 
                 logger.debug(`Invite creation response status: ${response.status}, ok: ${response.ok}`);
-                
+
                 if (response.ok && response.body && response.body.code) {
                     invites.add(response.body.code);
                     logger.info(`Generated invite: ${response.body.code}`);
@@ -214,7 +218,7 @@ async function collectGuildInvites(guildId: string): Promise<string[]> {
         const channelName = channel.name || "unknown";
         const channelId = channel.id;
         logger.debug(`Processing channel: ${channelName} (${channelId})`);
-        
+
         try {
             // Fetch most recent messages from API (last batch)
             // Using limit 100 (Discord's max per request) to get as many as possible
@@ -312,7 +316,7 @@ async function collectGuildInvites(guildId: string): Promise<string[]> {
                     if (fallbackResponse.ok && fallbackResponse.body && Array.isArray(fallbackResponse.body) && fallbackResponse.body.length > 0) {
                         const oldestMessageId = fallbackResponse.body[fallbackResponse.body.length - 1]?.id;
                         logger.debug(`Oldest message ID from fallback: ${oldestMessageId}`);
-                        
+
                         if (oldestMessageId) {
                             try {
                                 logger.debug(`Fetching messages before ${oldestMessageId} from channel ${channelName}`);
@@ -375,7 +379,7 @@ async function sendInvitesToGroupDM(guildId: string, guildName: string, inviteCo
 
     const targetGroupDmId = settings.store.targetGroupDmId;
     logger.debug(`Target Group DM ID: ${targetGroupDmId}`);
-    
+
     if (!targetGroupDmId) {
         logger.error("Target Group DM ID not configured");
         return;
@@ -392,7 +396,7 @@ async function sendInvitesToGroupDM(guildId: string, guildName: string, inviteCo
 
         const now = new Date().toISOString();
         const inviteLinks = inviteCodes.map(code => `- ${getInviteLink(code)}`).join("\n");
-        
+
         // Format message using template
         const message = settings.store.messageFormat
             .replace(/{now}/g, now)
@@ -421,7 +425,7 @@ async function sendInvitesToGroupDM(guildId: string, guildName: string, inviteCo
  */
 async function backupGuildInvites(guildId: string, isManual = false): Promise<void> {
     logger.debug(`backupGuildInvites called: guildId=${guildId}, isManual=${isManual}`);
-    
+
     try {
         const guild = GuildStore.getGuild(guildId);
         if (!guild) {
@@ -458,7 +462,7 @@ async function backupGuildInvites(guildId: string, isManual = false): Promise<vo
         if (isManual) {
             showToast(`Successfully backed up ${inviteCodes.length} invite(s)`, Toasts.Type.SUCCESS);
         }
-        
+
         logger.info(`Backup completed successfully for guild ${guild.name}`);
     } catch (error) {
         logger.error("Error in backupGuildInvites:", error);
@@ -477,7 +481,7 @@ async function backupGuildInvites(guildId: string, isManual = false): Promise<vo
 async function onGuildLeave(guildId: string) {
     logger.debug(`onGuildLeave called for guild: ${guildId}`);
     logger.debug(`autoBackupOnLeave setting: ${settings.store.autoBackupOnLeave}`);
-    
+
     // Only backup automatically if the setting is enabled
     if (!settings.store.autoBackupOnLeave) {
         logger.debug("Auto backup is disabled, skipping");
@@ -498,7 +502,7 @@ const GuildContextMenu: NavContextMenuPatchCallback = (children, { guild }) => {
     }
 
     logger.debug(`GuildContextMenu: Adding menu item for guild ${guild.name} (${guild.id})`);
-    
+
     children.push(
         <Menu.MenuItem
             id="backup-guild-invites"
@@ -530,9 +534,17 @@ export default definePlugin({
         }
     ],
 
-    contextMenus: {
-        "guild-context": GuildContextMenu,
-    },
 
+    stopCleanup: null as (() => void) | null,
+    start() {
+        this.stopCleanup = registerSharedContextMenu("GuildInviteSaver", {
+            "guild-context": (children, props) => {
+                if (props.guild) GuildContextMenu(children, props);
+            }
+        });
+    },
+    stop() {
+        this.stopCleanup?.();
+    },
     onGuildLeave
 });
